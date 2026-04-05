@@ -1,0 +1,66 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model Stock {
+  id        String   @id @default(cuid())
+  symbol    String   @unique
+  name      String
+  market    String
+  sector    String?
+  isin      String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  events          Event[]
+  recommendations Recommendation[]
+
+  @@index([market])
+  @@index([name])
+}
+
+model Event {
+  id           String   @id @default(cuid())
+  stockId      String?
+  sourceType   String
+  sourceName   String
+  eventType    String
+  title        String
+  content      String?
+  summary      String?
+  sourceUrl    String?
+  publishedAt  DateTime
+  score        Float    @default(0)
+  isNoise      Boolean  @default(false)
+  rawJson      Json?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  stock Stock? @relation(fields: [stockId], references: [id], onDelete: SetNull)
+
+  @@index([stockId, publishedAt])
+  @@index([eventType, publishedAt])
+  @@index([isNoise, publishedAt])
+}
+
+model Recommendation {
+  id          String   @id @default(cuid())
+  stockId     String
+  targetDate  DateTime
+  totalScore  Float
+  reason      String
+  risk        String?
+  evidence    Json?
+  confidence  Float?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  stock Stock @relation(fields: [stockId], references: [id], onDelete: Cascade)
+
+  @@index([targetDate, totalScore])
+  @@unique([stockId, targetDate])
+}
