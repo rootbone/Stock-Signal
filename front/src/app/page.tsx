@@ -1,6 +1,7 @@
 import Link from "next/link";
 import type { Prisma } from "@prisma/client";
 import { recommendationRepository } from "@/server/repositories/recommendation-repository";
+import GenerateRecommendationsButton from "@/components/GenerateRecommendationsButton";
 
 export const revalidate = 60;
 
@@ -15,7 +16,7 @@ type RecommendationEvidence = {
     summary?: string | null;
     eventType?: string;
     sourceName?: string;
-    score: number;
+    score?: number;
     publishedAt?: string;
   }[];
   metrics?: {
@@ -41,6 +42,10 @@ function confidenceToPercent(confidence: number | null | undefined): number {
   return Math.max(0, Math.min(100, confidence * 100));
 }
 
+function formatScore(score?: number | null) {
+  return typeof score === "number" ? score.toFixed(1) : "-";
+}
+
 export default async function HomePage() {
   const recommendations = await recommendationRepository.findTopLatest(6);
 
@@ -55,8 +60,8 @@ export default async function HomePage() {
   const avgConfidence =
     recommendations.length > 0
       ? Math.round(
-          recommendations.reduce((acc, item) => acc + (item.confidence ?? 0), 0) /
-            recommendations.length *
+          (recommendations.reduce((acc, item) => acc + (item.confidence ?? 0), 0) /
+            recommendations.length) *
             100
         )
       : 0;
@@ -81,7 +86,7 @@ export default async function HomePage() {
         publishedAt: event.publishedAt,
       }));
     })
-    .sort((a, b) => Math.abs(b.score) - Math.abs(a.score))
+    .sort((a, b) => Math.abs((b.score ?? 0)) - Math.abs((a.score ?? 0)))
     .slice(0, 4);
 
   return (
@@ -141,6 +146,10 @@ export default async function HomePage() {
                 caption="추천 근거 기준 집계"
               />
             </div>
+
+            <div className="mt-6">
+              <GenerateRecommendationsButton />
+            </div>
           </div>
 
           <div>
@@ -149,9 +158,7 @@ export default async function HomePage() {
                 stockName={featured.stock.name}
                 stockSymbol={featured.stock.symbol}
                 score={featured.totalScore}
-                reason={
-                  featuredEvidence?.analysis?.summary ?? featured.reason
-                }
+                reason={featuredEvidence?.analysis?.summary ?? featured.reason}
                 risk={featured.risk}
                 confidence={featured.confidence}
                 topEventCount={featuredEvidence?.topEvents?.length ?? 0}
@@ -272,7 +279,8 @@ export default async function HomePage() {
             {topEvents.length > 0 ? (
               <div className="space-y-3">
                 {topEvents.map((event, index) => {
-                  const isPositive = event.score >= 0;
+                  const numericScore = event.score ?? 0;
+                  const isPositive = numericScore >= 0;
 
                   return (
                     <div
@@ -302,8 +310,8 @@ export default async function HomePage() {
                               : "bg-[color:rgb(248_113_113_/_0.10)] text-[var(--negative)]"
                           }`}
                         >
-                          {event.score > 0 ? "+" : ""}
-                          {event.score.toFixed(1)}
+                          {numericScore > 0 ? "+" : ""}
+                          {formatScore(event.score)}
                         </div>
                       </div>
                     </div>

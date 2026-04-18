@@ -1,27 +1,10 @@
 "use client";
 
 import { Moon, SunMedium } from "lucide-react";
-import { useTheme } from "next-themes";
-import { useSyncExternalStore } from "react";
-
-function useIsClient() {
-  return useSyncExternalStore(
-    () => () => {},
-    () => true,
-    () => false
-  );
-}
+import { useTheme } from "@/components/providers/theme-provider";
 
 export function ThemeToggle() {
-  const isClient = useIsClient();
   const { resolvedTheme, setTheme } = useTheme();
-
-  if (!isClient) {
-    return (
-      <div className="h-10 w-10 rounded-xl border border-[var(--border)] bg-[var(--card)]" />
-    );
-  }
-
   const isDark = resolvedTheme === "dark";
 
   return (

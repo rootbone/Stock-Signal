@@ -1,272 +1,246 @@
-import { Prisma } from "@prisma/client";
-import { db } from "@/lib/db";
-import {
-  buildDailyRecommendations,
-  type DailyRecommendationBuildResult,
-} from "./recommendation-scoring";
-import {
-  recommendationRepository,
-  type RecommendationWithStock,
-} from "@/server/repositories/recommendation-repository";
-import { llmService } from "@/server/llm/llm-service";
-import type { RecommendationLlmOutput } from "@/server/llm/recommendation-llm-schema";
+import { Prisma, Event, Stock } from "@prisma/client";
 
-export interface GenerateDailyRecommendationsParams {
-  targetDate?: Date;
-  lookbackDays?: number;
-  limit?: number;
-  minScore?: number;
-}
-
-export interface DailyRecommendationItem {
-  id: string;
-  stockId: string;
-  stockSymbol: string;
-  stockName: string;
-  totalScore: number;
-  reason: string;
-  risk: string | null;
-  confidence: number | null;
-  evidence: Prisma.JsonValue | null;
-}
-
-export interface DailyRecommendationResult {
-  targetDate: Date;
-  createdCount: number;
-  deletedCount: number;
-  items: DailyRecommendationItem[];
-}
-
-type RecommendationEvidence = {
-  analysis: RecommendationLlmOutput;
-  topEvents: {
-    title: string;
-    eventType: string;
-    sourceType: string;
-    score: number;
-    publishedAt: string;
-    summary?: string | null;
-  }[];
-  metrics: {
-    totalEvents: number;
-    positiveEvents: number;
-    negativeEvents: number;
-  };
+type StockWithEvents = Stock & {
+  events: Event[];
 };
 
-export class RecommendationService {
-  async generateDailyRecommendations(
-    params: GenerateDailyRecommendationsParams = {},
-  ): Promise<DailyRecommendationResult> {
-    const targetDate = normalizeDateOnly(params.targetDate ?? new Date());
-    const lookbackDays = params.lookbackDays ?? 14;
-    const limit = params.limit ?? 10;
-    const minScore = params.minScore ?? 20;
-
-    const sinceDate = new Date(targetDate);
-    sinceDate.setDate(sinceDate.getDate() - lookbackDays);
-
-    const stocks = await db.stock.findMany({
-      include: {
-        events: {
-          where: {
-            publishedAt: {
-              gte: sinceDate,
-              lte: endOfDay(targetDate),
-            },
-          },
-          orderBy: {
-            publishedAt: "desc",
-          },
-        },
-      },
-    });
-
-    const built: DailyRecommendationBuildResult[] = buildDailyRecommendations({
-      stocks,
-      targetDate,
-      minScore,
-      limit,
-    });
-
-    const createInputs: Prisma.RecommendationCreateManyInput[] = [];
-
-    for (const item of built) {
-      const analysis = await this.generateInsightWithFallback(item);
-
-      const evidence: RecommendationEvidence = {
-        analysis,
-        topEvents: item.topEventsForLlm.map((event) => ({
-          title: event.title,
-          summary: event.summary,
-          eventType: event.eventType,
-          sourceType: event.sourceType,
-          score: event.adjustedScore,
-          publishedAt: event.publishedAt,
-        })),
-        metrics: {
-          totalEvents: item.topEventsForLlm.length,
-          positiveEvents: item.topEventsForLlm.filter(
-            (event) => event.adjustedScore > 0,
-          ).length,
-          negativeEvents: item.topEventsForLlm.filter(
-            (event) => event.adjustedScore < 0,
-          ).length,
-        },
-      };
-
-      createInputs.push({
-        stockId: item.stockId,
-        targetDate,
-        totalScore: item.totalScore,
-        reason: analysis.summary,
-        risk: analysis.risks.length > 0 ? analysis.risks.join(" ") : null,
-        evidence: evidence as Prisma.InputJsonValue,
-        confidence: item.confidence,
-      });
-    }
-
-    const result = await recommendationRepository.replaceDailyRecommendations(
-      targetDate,
-      createInputs,
-    );
-
-    const saved = await recommendationRepository.findByTargetDate(
-      targetDate,
-      limit,
-    );
-
-    return {
-      targetDate,
-      createdCount: result.createdCount,
-      deletedCount: result.deletedCount,
-      items: saved.map((item: RecommendationWithStock) => ({
-        id: item.id,
-        stockId: item.stockId,
-        stockSymbol: item.stock.symbol,
-        stockName: item.stock.name,
-        totalScore: item.totalScore,
-        reason: item.reason,
-        risk: item.risk,
-        confidence: item.confidence,
-        evidence: item.evidence as Prisma.JsonValue | null,
-      })),
-    };
-  }
-
-  async getDailyRecommendations(
-    targetDate?: Date,
-    limit = 10,
-  ): Promise<DailyRecommendationResult | null> {
-    const normalizedTargetDate = targetDate
-      ? normalizeDateOnly(targetDate)
-      : undefined;
-
-    const rows = normalizedTargetDate
-      ? await recommendationRepository.findByTargetDate(normalizedTargetDate, limit)
-      : await recommendationRepository.findTopLatest(limit);
-
-    if (rows.length === 0) {
-      return null;
-    }
-
-    return {
-      targetDate: rows[0].targetDate,
-      createdCount: rows.length,
-      deletedCount: 0,
-      items: rows.map((item: RecommendationWithStock) => ({
-        id: item.id,
-        stockId: item.stockId,
-        stockSymbol: item.stock.symbol,
-        stockName: item.stock.name,
-        totalScore: item.totalScore,
-        reason: item.reason,
-        risk: item.risk,
-        confidence: item.confidence,
-        evidence: item.evidence as Prisma.JsonValue | null,
-      })),
-    };
-  }
-
-  private async generateInsightWithFallback(
-    item: DailyRecommendationBuildResult,
-  ): Promise<RecommendationLlmOutput> {
-    try {
-      return await llmService.generateRecommendationInsight({
-        stockName: item.stockName,
-        stockSymbol: item.stockSymbol,
-        market: item.market,
-        sector: item.sector,
-        totalScore: item.totalScore,
-        events: item.topEventsForLlm.map((event) => ({
-          title: event.title,
-          summary: event.summary,
-          eventType: event.eventType,
-          sourceType: event.sourceType,
-          score: event.adjustedScore,
-          publishedAt: event.publishedAt,
-        })),
-      });
-    } catch (error) {
-      console.error("[LLM insight fallback]", error);
-      return buildFallbackInsight(item);
-    }
-  }
+interface BuildDailyRecommendationsParams {
+  stocks: StockWithEvents[];
+  targetDate: Date;
+  minScore: number;
+  limit: number;
 }
 
-function buildFallbackInsight(
-  item: DailyRecommendationBuildResult,
-): RecommendationLlmOutput {
-  const eventTypeLabels = Array.from(
-    new Set(item.topEventsForLlm.map((event) => mapEventTypeLabel(event.eventType))),
+export type DailyRecommendationEvidenceEvent = {
+  eventId: string;
+  eventType: string;
+  sourceType: string;
+  sourceName: string;
+  title: string;
+  publishedAt: string;
+  originalScore: number;
+  adjustedScore: number;
+  summary: string | null;
+  sourceUrl: string | null;
+};
+
+export interface DailyRecommendationBuildResult {
+  stockId: string;
+  stockName: string;
+  stockSymbol: string;
+  market: string;
+  sector: string | null;
+  totalScore: number;
+  confidence: number;
+  evidence: Prisma.InputJsonObject;
+  topEventsForLlm: DailyRecommendationEvidenceEvent[];
+}
+
+const EVENT_TYPE_WEIGHT: Record<string, number> = {
+  CONTRACT: 1.8,
+  EARNINGS: 1.2,
+  DISCLOSURE: 1.0,
+  GUIDANCE: 1.15,
+  PRODUCT: 1.1,
+  PARTNERSHIP: 1.25,
+  DEFAULT: 0.9,
+};
+
+const SOURCE_TYPE_WEIGHT: Record<string, number> = {
+  DART: 1.2,
+  NEWS: 1.0,
+  BASIC_INFO: 0.6,
+  DEFAULT: 1.0,
+};
+
+export function buildDailyRecommendations(
+  params: BuildDailyRecommendationsParams,
+): DailyRecommendationBuildResult[] {
+  const { stocks, targetDate, minScore, limit } = params;
+
+  return stocks
+    .map((stock) => calculateStockRecommendation(stock, targetDate))
+    .filter(
+      (item): item is DailyRecommendationBuildResult => item !== null,
+    )
+    .filter((item) => item.totalScore >= minScore)
+    .sort((a, b) => {
+      if (b.totalScore !== a.totalScore) return b.totalScore - a.totalScore;
+      return b.confidence - a.confidence;
+    })
+    .slice(0, limit);
+}
+
+function calculateStockRecommendation(
+  stock: StockWithEvents,
+  targetDate: Date,
+): DailyRecommendationBuildResult | null {
+  const scoredEvents = stock.events.map((event) => ({
+    event,
+    adjustedScore: calculateEventScore(event, targetDate),
+  }));
+
+  const activeEvents = scoredEvents.filter((item) => item.adjustedScore > 0);
+
+  if (activeEvents.length === 0) {
+    return null;
+  }
+
+  const totalScore = roundNumber(
+    activeEvents.reduce((acc, cur) => acc + cur.adjustedScore, 0),
   );
 
-  const topTitle = item.topEventsForLlm[0]?.title ?? "주요 이벤트";
-  const labels = eventTypeLabels.slice(0, 3);
+  const sortedTopEvents = [...activeEvents]
+    .sort((a, b) => b.adjustedScore - a.adjustedScore)
+    .slice(0, 5);
+
+  const confidence = calculateConfidence(scoredEvents, sortedTopEvents);
+
+  const noiseCount = stock.events.filter((event) => event.isNoise).length;
+  const positiveEventCount = activeEvents.filter(
+    (item) => item.adjustedScore >= 10,
+  ).length;
+
+  const averageFreshnessWeight =
+    activeEvents.length === 0
+      ? 0
+      : roundNumber(
+          activeEvents.reduce(
+            (acc, cur) => acc + freshnessWeight(cur.event.publishedAt, targetDate),
+            0,
+          ) / activeEvents.length,
+        );
+
+  const topEventsForLlm: DailyRecommendationEvidenceEvent[] = sortedTopEvents.map(
+    ({ event, adjustedScore }) => ({
+      eventId: event.id,
+      eventType: event.eventType,
+      sourceType: event.sourceType,
+      sourceName: event.sourceName,
+      title: event.title,
+      publishedAt: event.publishedAt.toISOString(),
+      originalScore: event.score,
+      adjustedScore: roundNumber(adjustedScore),
+      summary: event.summary,
+      sourceUrl: event.sourceUrl,
+    }),
+  );
+
+  const evidence: Prisma.InputJsonObject = {
+    targetDate: targetDate.toISOString(),
+    stock: {
+      id: stock.id,
+      symbol: stock.symbol,
+      name: stock.name,
+      market: stock.market,
+      sector: stock.sector,
+    },
+    metrics: {
+      rawEventCount: stock.events.length,
+      activeEventCount: activeEvents.length,
+      noiseCount,
+      positiveEventCount,
+      averageFreshnessWeight,
+    },
+    topEvents: topEventsForLlm,
+  };
 
   return {
-    summary: `${item.stockName}(${item.stockSymbol})은(는) 최근 ${labels.join(", ")} 관련 이벤트가 집중되었고, 특히 "${topTitle}" 이슈의 기여도가 높아 오늘 주목 종목으로 분류되었습니다.`,
-    positives: labels.map((label) => `${label} 관련 흐름이 반영되었습니다.`),
-    risks: [
-      "이벤트 기반 추천 특성상 단기 기대감이 선반영될 수 있습니다.",
-      "실제 수급과 시장 반응에 따라 변동성이 확대될 수 있습니다.",
-    ],
+    stockId: stock.id,
+    stockName: stock.name,
+    stockSymbol: stock.symbol,
+    market: stock.market,
+    sector: stock.sector,
+    totalScore,
+    confidence,
+    evidence,
+    topEventsForLlm,
   };
 }
 
-function mapEventTypeLabel(eventType: string): string {
-  switch (eventType) {
-    case "CONTRACT":
-      return "수주 공시";
-    case "EARNINGS":
-      return "실적 발표";
-    case "GUIDANCE":
-      return "가이던스";
-    case "PARTNERSHIP":
-      return "제휴";
-    case "PRODUCT":
-      return "신제품";
-    case "DISCLOSURE":
-      return "공시";
-    default:
-      return "이벤트";
+export function calculateEventScore(event: Event, targetDate: Date): number {
+  if (event.isNoise) {
+    return 0;
   }
+
+  const typeWeight = EVENT_TYPE_WEIGHT[event.eventType] ?? EVENT_TYPE_WEIGHT.DEFAULT;
+  const sourceWeight =
+    SOURCE_TYPE_WEIGHT[event.sourceType] ?? SOURCE_TYPE_WEIGHT.DEFAULT;
+
+  const baseScore = resolveBaseScore(event);
+  const freshness = freshnessWeight(event.publishedAt, targetDate);
+
+  return roundNumber(Math.max(baseScore * typeWeight * sourceWeight * freshness, 0));
+}
+
+function resolveBaseScore(event: Event): number {
+  if (event.score > 0) {
+    return event.score;
+  }
+
+  switch (event.eventType) {
+    case "CONTRACT":
+      return 20;
+    case "EARNINGS":
+      return 12;
+    case "GUIDANCE":
+      return 11;
+    case "PARTNERSHIP":
+      return 10;
+    case "PRODUCT":
+      return 8;
+    case "DISCLOSURE":
+      return 7;
+    default:
+      return 5;
+  }
+}
+
+function freshnessWeight(publishedAt: Date, targetDate: Date): number {
+  const diffMs =
+    normalizeDateOnly(targetDate).getTime() -
+    normalizeDateOnly(publishedAt).getTime();
+
+  const days = Math.max(0, Math.floor(diffMs / (1000 * 60 * 60 * 24)));
+
+  if (days <= 1) return 1.3;
+  if (days <= 3) return 1.15;
+  if (days <= 7) return 1.0;
+  if (days <= 14) return 0.8;
+  if (days <= 30) return 0.5;
+  return 0.2;
+}
+
+function calculateConfidence(
+  allScoredEvents: { event: Event; adjustedScore: number }[],
+  topEvents: { event: Event; adjustedScore: number }[],
+): number {
+  const nonNoiseCount = allScoredEvents.filter((item) => !item.event.isNoise).length;
+  const trustedSourceCount = topEvents.filter(
+    (item) => item.event.sourceName === "DART",
+  ).length;
+
+  const averageTopScore =
+    topEvents.length > 0
+      ? topEvents.reduce((acc, cur) => acc + cur.adjustedScore, 0) / topEvents.length
+      : 0;
+
+  let confidence = 0.4;
+
+  if (nonNoiseCount >= 3) confidence += 0.15;
+  if (nonNoiseCount >= 5) confidence += 0.1;
+  if (trustedSourceCount >= 1) confidence += 0.15;
+  if (trustedSourceCount >= 2) confidence += 0.05;
+  if (averageTopScore >= 15) confidence += 0.1;
+  if (averageTopScore >= 25) confidence += 0.05;
+
+  return roundNumber(Math.min(confidence, 0.95));
 }
 
 function normalizeDateOnly(date: Date): Date {
   return new Date(date.getFullYear(), date.getMonth(), date.getDate());
 }
 
-function endOfDay(date: Date): Date {
-  return new Date(
-    date.getFullYear(),
-    date.getMonth(),
-    date.getDate(),
-    23,
-    59,
-    59,
-    999,
-  );
+function roundNumber(value: number): number {
+  return Math.round(value * 100) / 100;
 }
-
-export const recommendationService = new RecommendationService();

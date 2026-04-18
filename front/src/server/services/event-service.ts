@@ -22,9 +22,7 @@ export class EventService {
 
       const stocks = await this.stockRepo.findBySymbols(symbols);
 
-      const stockMap = new Map(
-        stocks.map((s) => [s.symbol, s.id])
-      );
+      const stockMap = new Map(stocks.map((s) => [s.symbol, s.id]));
 
       const createInputs = normalized.map((e) => ({
         stockId: stockMap.get(e.symbol),

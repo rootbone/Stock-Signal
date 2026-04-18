@@ -24,20 +24,34 @@ function getScoreDelta(data: { date: string; score: number }[]) {
 }
 
 export default function ScoreChart({ data }: Props) {
+  const safeData =
+    data.length === 1
+      ? [
+          {
+            date: `${data[0]!.date} `,
+            score: data[0]!.score,
+          },
+          data[0]!,
+        ]
+      : data;
+
   const stats = useMemo(() => {
-    const scores = data.map((item) => item.score);
+    const scores = safeData.map((item) => item.score);
     const latest = scores.at(-1) ?? 0;
     const highest = scores.length ? Math.max(...scores) : 0;
     const lowest = scores.length ? Math.min(...scores) : 0;
-    const delta = getScoreDelta(data);
+    const delta = getScoreDelta(safeData);
 
-    return {
-      latest,
-      highest,
-      lowest,
-      delta,
-    };
-  }, [data]);
+    return { latest, highest, lowest, delta };
+  }, [safeData]);
+
+  if (safeData.length === 0) {
+    return (
+      <div className="rounded-2xl border border-dashed border-[var(--border)] p-6 text-sm text-[var(--muted-foreground)]">
+        차트 데이터가 없습니다.
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-5">
@@ -51,7 +65,7 @@ export default function ScoreChart({ data }: Props) {
       <div className="h-80 w-full rounded-[24px] border border-[var(--border)] bg-[var(--background)] p-3">
         <ResponsiveContainer width="100%" height="100%">
           <LineChart
-            data={data}
+            data={safeData}
             margin={{ top: 16, right: 12, left: -12, bottom: 4 }}
           >
             <CartesianGrid
@@ -60,30 +74,20 @@ export default function ScoreChart({ data }: Props) {
               vertical={false}
               opacity={0.6}
             />
-
             <XAxis
               dataKey="date"
               tick={{ fill: "var(--muted-foreground)", fontSize: 12 }}
               axisLine={{ stroke: "var(--border)" }}
               tickLine={{ stroke: "var(--border)" }}
             />
-
             <YAxis
               tick={{ fill: "var(--muted-foreground)", fontSize: 12 }}
               axisLine={{ stroke: "var(--border)" }}
               tickLine={{ stroke: "var(--border)" }}
               width={40}
-              domain={["dataMin - 5", "dataMax + 5"]}
+              domain={["auto", "auto"]}
             />
-
-            <Tooltip
-              cursor={{
-                stroke: "var(--border)",
-                strokeDasharray: "3 3",
-              }}
-              content={<CustomTooltip />}
-            />
-
+            <Tooltip content={<CustomTooltip />} />
             <Line
               type="monotone"
               dataKey="score"

@@ -65,9 +65,7 @@ export function buildDailyRecommendations(
     )
     .filter((item) => item.totalScore >= minScore)
     .sort((a, b) => {
-      if (b.totalScore !== a.totalScore) {
-        return b.totalScore - a.totalScore;
-      }
+      if (b.totalScore !== a.totalScore) return b.totalScore - a.totalScore;
       return b.confidence - a.confidence;
     })
     .slice(0, limit);
@@ -77,14 +75,10 @@ function calculateStockRecommendation(
   stock: StockWithEvents,
   targetDate: Date,
 ): DailyRecommendationBuildResult | null {
-  const scoredEvents = stock.events.map((event) => {
-    const adjustedScore = calculateEventScore(event, targetDate);
-
-    return {
-      event,
-      adjustedScore,
-    };
-  });
+  const scoredEvents = stock.events.map((event) => ({
+    event,
+    adjustedScore: calculateEventScore(event, targetDate),
+  }));
 
   const activeEvents = scoredEvents.filter((item) => item.adjustedScore > 0);
 
